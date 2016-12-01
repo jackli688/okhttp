@@ -418,6 +418,29 @@ public final class WebSocketHttpTest {
     assertEquals(0, webSocket.pingCount());
   }
 
+  /** https://github.com/square/okhttp/issues/2788 */
+  @Test public void clientCancelsIfCloseIsNotAcknowledged() throws Exception {
+    webServer.enqueue(new MockResponse().withWebSocketUpgrade(serverListener));
+    RealWebSocket webSocket = newWebSocket();
+
+    clientListener.assertOpen();
+    WebSocket server = serverListener.assertOpen();
+
+    // Initiate a close on the client, which will schedule a hard cancel in 500 ms.
+    long closeAtNanos = System.nanoTime();
+    webSocket.close(1000, "goodbye", 500);
+    serverListener.assertClosing(1000, "goodbye");
+
+    // Confirm that the hard cancel occurred after 500 ms.
+    clientListener.assertFailure();
+    long elapsedUntilFailure = System.nanoTime() - closeAtNanos;
+    assertEquals(500, TimeUnit.NANOSECONDS.toMillis(elapsedUntilFailure), 250d);
+
+    // Close the server and confirm it saw what we expected.
+    server.close(1000, null);
+    serverListener.assertClosed(1000, "goodbye");
+  }
+
   private MockResponse upgradeResponse(RecordedRequest request) {
     String key = request.getHeader("Sec-WebSocket-Key");
     return new MockResponse()

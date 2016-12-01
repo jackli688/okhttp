@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -55,6 +56,12 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
    * the web socket! It's possible that we're writing faster than the peer can read.
    */
   private static final long MAX_QUEUE_SIZE = 16 * 1024 * 1024; // 16 MiB.
+
+  /**
+   * The maximum amount of time after the client calls {@link #close} to wait for a graceful
+   * shutdown. If the server doesn't respond the websocket will be canceled.
+   */
+  private static final long CANCEL_AFTER_CLOSE_MILLIS = 60 * 1000;
 
   /** The application's original request unadulterated by web socket headers. */
   private final Request originalRequest;
@@ -98,6 +105,12 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
 
   /** True if we've enqueued a close frame. No further message frames will be enqueued. */
   private boolean enqueuedClose;
+
+  /**
+   * When executed this will cancel this websocket. This future itself should be canceled if that is
+   * unnecessary because the web socket is already closed or canceled.
+   */
+  private ScheduledFuture<?> cancelFuture;
 
   /** The close code from the peer, or -1 if this web socket has not yet read a close frame. */
   private int receivedCloseCode = -1;
@@ -303,6 +316,7 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
       if (enqueuedClose && messageAndCloseQueue.isEmpty()) {
         toClose = this.streams;
         this.streams = null;
+        if (cancelFuture != null) cancelFuture.cancel(false);
         this.executor.shutdown();
       }
     }
@@ -356,7 +370,12 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
     return true;
   }
 
-  @Override public synchronized boolean close(final int code, final String reason) {
+  @Override public boolean close(int code, String reason) {
+    return close(code, reason, CANCEL_AFTER_CLOSE_MILLIS);
+  }
+
+  public synchronized boolean close(
+      int code, String reason, long cancelAfterCloseMillis) {
     validateCloseCode(code);
     // TODO(jwilson): confirm reason is well-formed. (<=123 bytes, etc.)
 
@@ -366,7 +385,7 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
     enqueuedClose = true;
 
     // Enqueue the close frame.
-    messageAndCloseQueue.add(new Close(code, reason));
+    messageAndCloseQueue.add(new Close(code, reason, cancelAfterCloseMillis));
     runWriter();
     return true;
   }
@@ -416,8 +435,11 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
             streamsToClose = this.streams;
             this.streams = null;
             this.executor.shutdown();
+          } else {
+            // When we request a graceful close also schedule a cancel of the websocket.
+            cancelFuture = executor.schedule(new CancelRunnable(),
+                ((Close) messageOrClose).cancelAfterCloseMillis, MILLISECONDS);
           }
-
         } else if (messageOrClose == null) {
           return false; // The queue is exhausted.
         }
@@ -484,6 +506,7 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
       failed = true;
       streamsToClose = this.streams;
       this.streams = null;
+      if (cancelFuture != null) cancelFuture.cancel(false);
       if (executor != null) executor.shutdown();
     }
 
@@ -507,10 +530,12 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
   static final class Close {
     final int code;
     final String reason;
+    final long cancelAfterCloseMillis;
 
-    public Close(int code, String reason) {
+    public Close(int code, String reason, long cancelAfterCloseMillis) {
       this.code = code;
       this.reason = reason;
+      this.cancelAfterCloseMillis = cancelAfterCloseMillis;
     }
   }
 
@@ -536,6 +561,12 @@ public final class RealWebSocket implements WebSocket, WebSocketReader.FrameCall
 
     @Override public void close() {
       streamAllocation.streamFinished(true, streamAllocation.codec());
+    }
+  }
+
+  final class CancelRunnable implements Runnable {
+    @Override public void run() {
+      cancel();
     }
   }
 }

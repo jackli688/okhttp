@@ -19,8 +19,8 @@ import java.io.IOException;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import okhttp3.WebSocket;
 import okhttp3.Response;
+import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
 import okhttp3.internal.Util;
 import okhttp3.internal.platform.Platform;
@@ -192,6 +192,13 @@ public final class WebSocketRecorder extends WebSocketListener {
     assertNull(failure.response);
     assertEquals(cls, failure.t.getClass());
     assertEquals(message, failure.t.getMessage());
+  }
+
+  public void assertFailure() {
+    Object event = nextEvent();
+    if (!(event instanceof Failure)) {
+      throw new AssertionError("Expected Failure but was " + event);
+    }
   }
 
   public void assertFailure(int code, String body, Class<? extends IOException> cls, String message)
